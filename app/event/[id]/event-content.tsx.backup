@@ -1,0 +1,394 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { useParams, useSearchParams } from "next/navigation"
+import { createClient } from "@/lib/supabase/client"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { verifyParticipantPin } from "@/app/actions/verify-pin"
+
+interface Participant {
+  id: string
+  name: string
+  assigned_to: string | null
+  pin_hash: string
+}
+
+interface Event {
+  id: string
+  name: string
+  description: string | null
+  code: string
+  budget?: number | null
+}
+
+export default function EventContent() {
+  const params = useParams()
+  const searchParams = useSearchParams()
+  const eventId = params.id as string
+  const participantId = searchParams.get("participant")
+
+  const [event, setEvent] = useState<Event | null>(null)
+  const [participant, setParticipant] = useState<Participant | null>(null)
+  const [assignedTo, setAssignedTo] = useState<Participant | null>(null)
+  const [allParticipants, setAllParticipants] = useState<Participant[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [revealed, setRevealed] = useState(false)
+  const [showAssignmentButton, setShowAssignmentButton] = useState(false)
+  const [selectedParticipantForEvent, setSelectedParticipantForEvent] = useState<string | null>(participantId || null)
+  const [isCreator, setIsCreator] = useState(false)
+  const [pinVerificationMode, setPinVerificationMode] = useState(false)
+  const [pinInput, setPinInput] = useState("")
+  const [pendingParticipantId, setPendingParticipantId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const savedParticipantId = localStorage.getItem(`event-${eventId}-participant`)
+    if (savedParticipantId && !participantId) {
+      setSelectedParticipantForEvent(savedParticipantId)
+    }
+  }, [eventId, participantId])
+
+  useEffect(() => {
+    loadEventData()
+  }, [eventId, selectedParticipantForEvent])
+
+  const loadEventData = async () => {
+    try {
+      const supabase = createClient()
+
+      // Load event
+      const { data: eventData, error: eventError } = await supabase
+        .from("events")
+        .select("*")
+        .eq("id", eventId)
+        .single()
+
+      if (eventError) throw eventError
+      setEvent(eventData)
+
+      // Load all participants
+      const { data: participantsData, error: participantsError } = await supabase
+        .from("participants")
+        .select("*")
+        .eq("event_id", eventId)
+
+      if (participantsError) throw participantsError
+      setAllParticipants(participantsData || [])
+
+      // Load current participant if selected
+      if (selectedParticipantForEvent) {
+        const currentParticipant = participantsData?.find((p) => p.id === selectedParticipantForEvent)
+        if (currentParticipant) {
+          setParticipant(currentParticipant)
+
+          // Load assigned person if exists
+          if (currentParticipant.assigned_to) {
+            const assignedPerson = participantsData?.find((p) => p.id === currentParticipant.assigned_to)
+            if (assignedPerson) {
+              setAssignedTo(assignedPerson)
+            }
+          }
+        }
+      } else {
+        setParticipant(null)
+        setAssignedTo(null)
+      }
+
+      // Check if user is the event creator (first participant)
+      const firstParticipant = participantsData && participantsData.length > 0 ? participantsData[0] : null
+      setIsCreator(selectedParticipantForEvent === firstParticipant?.id)
+
+      // Check if assignments are done
+      const allAssigned = participantsData?.every((p) => p.assigned_to !== null)
+      setShowAssignmentButton(
+        selectedParticipantForEvent === firstParticipant?.id &&
+          participantsData &&
+          participantsData.length > 1 &&
+          !allAssigned,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load event")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleParticipantSelect = (participantId: string) => {
+    setPendingParticipantId(participantId)
+    setPinVerificationMode(true)
+    setPinInput("")
+  }
+
+  const handlePinVerification = async () => {
+    if (!pendingParticipantId || !pinInput.trim()) {
+      setError("Please enter your PIN")
+      return
+    }
+
+    const targetParticipant = allParticipants.find((p) => p.id === pendingParticipantId)
+    if (!targetParticipant) {
+      setError("Participant not found")
+      return
+    }
+
+    console.log("[CLIENT] Calling verifyParticipantPin with:", {
+      participantId: pendingParticipantId,
+      pinLength: pinInput.length,
+      pin: pinInput,
+    })
+
+    const isValid = await verifyParticipantPin(pendingParticipantId, pinInput)
+
+    console.log("[CLIENT] verifyParticipantPin returned:", isValid)
+
+    if (!isValid) {
+      setError("Invalid PIN. Please try again.")
+      setPinInput("")
+      return
+    }
+
+    localStorage.setItem(`event-${eventId}-participant`, pendingParticipantId)
+    setSelectedParticipantForEvent(pendingParticipantId)
+    setPinVerificationMode(false)
+    setPinInput("")
+    setError(null)
+  }
+
+  const handleAssignments = async () => {
+    try {
+      const supabase = createClient()
+
+      // Shuffle and assign
+      const unassignedParticipants = [...allParticipants].sort(() => Math.random() - 0.5)
+      const assignments: Array<{ id: string; assigned_to: string }> = []
+
+      for (let i = 0; i < unassignedParticipants.length; i++) {
+        const nextIndex = (i + 1) % unassignedParticipants.length
+        assignments.push({
+          id: unassignedParticipants[i].id,
+          assigned_to: unassignedParticipants[nextIndex].id,
+        })
+      }
+
+      // Update all participants with assignments
+      for (const assignment of assignments) {
+        const { error } = await supabase
+          .from("participants")
+          .update({ assigned_to: assignment.assigned_to })
+          .eq("id", assignment.id)
+
+        if (error) throw error
+      }
+
+      // Reload data
+      await loadEventData()
+      setShowAssignmentButton(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to assign gifts")
+    }
+  }
+
+  const formatCurrency = (amountUSD: number | null | undefined) => {
+    if (!amountUSD) return null
+    const amountKES = amountUSD * 129
+    return {
+      usd: `$${amountUSD.toFixed(2)}`,
+      kes: `KES ${amountKES.toLocaleString("en-KE", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`,
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-background to-secondary flex items-center justify-center p-4">
+        <p className="text-muted-foreground">Loading...</p>
+      </div>
+    )
+  }
+
+  if (pinVerificationMode) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-background to-secondary flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <Card>
+            <CardHeader>
+              <CardTitle>Verify Your Identity</CardTitle>
+              <CardDescription>
+                Enter your PIN to access {allParticipants.find((p) => p.id === pendingParticipantId)?.name}'s assignment
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Input
+                type="password"
+                placeholder="Enter your PIN"
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handlePinVerification()
+                  }
+                }}
+              />
+              {error && <p className="text-sm text-destructive">{error}</p>}
+              <div className="flex gap-2">
+                <Button onClick={handlePinVerification} className="flex-1" disabled={!pinInput.trim()}>
+                  Verify
+                </Button>
+                <Button
+                  onClick={() => {
+                    setPinVerificationMode(false)
+                    setPinInput("")
+                    setError(null)
+                    setPendingParticipantId(null)
+                  }}
+                  variant="outline"
+                  className="flex-1"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-background to-secondary p-4 py-8">
+      <div className="max-w-2xl mx-auto">
+        {/* Event Header */}
+        {event && (
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-foreground mb-2">{event.name}</h1>
+            {event.description && <p className="text-muted-foreground mb-4">{event.description}</p>}
+            {event.budget && (
+              <div className="mb-4">
+                <p className="text-sm text-muted-foreground mb-2">Budget</p>
+                <p className="text-lg font-semibold text-foreground">{formatCurrency(event.budget)?.usd}</p>
+                <p className="text-base text-primary font-medium">{formatCurrency(event.budget)?.kes}</p>
+              </div>
+            )}
+            <div className="inline-block bg-primary/10 px-4 py-2 rounded-lg">
+              <p className="text-sm text-muted-foreground">Code: </p>
+              <p className="text-xl font-mono font-bold text-primary">{event.code}</p>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <Card className="mb-6 border-destructive">
+            <CardContent className="pt-6">
+              <p className="text-destructive">{error}</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Main Content */}
+        <div className="grid gap-6">
+          {!selectedParticipantForEvent && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Select Your Name</CardTitle>
+                <CardDescription>Click your name to see your assignment</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-2">
+                  {allParticipants.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => handleParticipantSelect(p.id)}
+                      className="p-4 text-left rounded-lg border-2 border-secondary bg-secondary hover:border-primary transition-colors"
+                    >
+                      <span className="font-medium">{p.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Participant Info */}
+          {participant && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Your Secret Assignment</CardTitle>
+                <CardDescription>You are buying a gift for:</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {assignedTo ? (
+                  <div className="text-center space-y-4">
+                    {!revealed ? (
+                      <>
+                        <p className="text-muted-foreground mb-4">Click to reveal who you're gifting to</p>
+                        <Button size="lg" className="mx-auto" onClick={() => setRevealed(true)}>
+                          Reveal Assignment
+                        </Button>
+                      </>
+                    ) : (
+                      <div className="bg-primary/10 border-2 border-primary rounded-lg p-8">
+                        <p className="text-sm text-muted-foreground mb-2">You are gifting to:</p>
+                        <p className="text-4xl font-bold text-primary">{assignedTo.name}</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-center text-muted-foreground">Waiting for assignments...</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Admin Assignment Button */}
+          {showAssignmentButton && participant && (
+            <Card className="border-primary bg-primary/5">
+              <CardHeader>
+                <CardTitle className="text-primary">Ready to Assign?</CardTitle>
+                <CardDescription>
+                  Once everyone has joined, click below to randomly assign gifting buddies
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button onClick={handleAssignments} className="w-full" size="lg">
+                  Start Secret Assignment
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Participants List */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Participants ({allParticipants.length})</CardTitle>
+              <CardDescription>Everyone in this event</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {allParticipants.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => handleParticipantSelect(p.id)}
+                    className={`w-full flex items-center justify-between p-3 rounded-lg transition-colors ${
+                      p.id === selectedParticipantForEvent
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary hover:bg-secondary/80"
+                    }`}
+                  >
+                    <span className={p.id === selectedParticipantForEvent ? "font-bold" : ""}>
+                      {p.name}
+                      {p.id === selectedParticipantForEvent && " (You)"}
+                    </span>
+                    <div className="flex gap-2 items-center">
+                      {p.assigned_to && <span className="text-xs bg-primary/20 px-2 py-1 rounded">Assigned</span>}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}

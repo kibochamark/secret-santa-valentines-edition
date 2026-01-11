@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Event {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name         String
+  description  String?
+  code         String        @unique
+  budget       Decimal?      @default(0) @db.Decimal(10, 2)
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  participants Participant[]
+
+  @@index([code], map: "idx_events_code")
+  @@map("events")
+}
+
+model Participant {
+  id         String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId    String        @map("event_id") @db.Uuid
+  name       String
+  pin        String        @unique
+  assignedTo String?       @map("assigned_to") @db.Uuid
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  event      Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  assignedToParticipant Participant?  @relation("AssignedTo", fields: [assignedTo], references: [id])
+  assignedParticipants  Participant[] @relation("AssignedTo")
+
+  @@index([eventId], map: "idx_participants_event_id")
+  @@index([assignedTo], map: "idx_participants_assigned_to")
+  @@map("participants")
+}
